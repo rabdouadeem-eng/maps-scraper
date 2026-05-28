@@ -1,51 +1,39 @@
 # =====================================================================
 # PROFESSIONAL DATA EXTRACTION SYSTEM - ABDellah VENTURES LLC (c) 2026
-# إصدار Google Colab الخالص (يعمل من الهاتف، بدون ملفات خارجية)
-# الميزات: تقارير، حفظ CSV/JSON، ترحيل ذكي، مصادقة سحابية تلقائية
 # Target: Western Markets (USA / UK / Canada / Australia / Europe)
+# Uses: Google Places API (New) v1
 # =====================================================================
-
-# 1. تثبيت المكتبات
-
 
 import requests
 import pandas as pd
 import time
 import json
 import gspread
-from google.colab import auth
-from google.colab import userdata
+from google.colab import auth, userdata
 from google.auth import default
 
 print("="*50)
 print("🔐 PROFESSIONAL DATA EXTRACTION - ABDellah VENTURES LLC")
 print("="*50)
 
-# 2. سحب المفتاح من Colab Secrets
-try:
-    GOOGLE_MAPS_API_KEY = userdata.get('GOOGLE_MAPS_API_KEY')
-    print("✅ Google Maps API Key loaded from Secrets.")
-except Exception as e:
-    raise ValueError("❌ 'GOOGLE_MAPS_API_KEY' not found in Colab Secrets. Please add it first.")
+# 1. API Key
+GOOGLE_MAPS_API_KEY = userdata.get('GOOGLE_MAPS_API_KEY')
+print("✅ Google Maps API Key loaded from Secrets.")
 
-# 3. المصادقة مع Google Sheets
+# 2. Google Sheets Auth
 print("\n🔑 Authenticating with Google Cloud...")
 auth.authenticate_user()
 creds, _ = default()
 gc = gspread.authorize(creds)
 print("✅ Connected to Google Sheets & Google Drive.")
 
-# 4. إعدادات النظام
-SHEET_NAME = "Data_Collection"
-OUTPUT_CSV = "extracted_data.csv"
-OUTPUT_JSON = "extracted_data.json"
-DEFAULT_LANGUAGE = "en"                # ✅ English for Western markets
-MAX_RESULTS_PER_QUERY = 150
+# 3. Settings
+SHEET_NAME    = "Data_Collection"
+OUTPUT_CSV    = "extracted_data.csv"
+OUTPUT_JSON   = "extracted_data.json"
+TARGET_CITY   = "New York"   # Change: London / Toronto / Sydney / Paris
+MAX_RESULTS   = 60           # New API: max 20/request x 3 pages
 
-# 5. المدينة المستهدفة — غيّرها حسب الطلب
-TARGET_CITY = "New York"               # 🌍 Change: London / Toronto / Sydney / Paris
-
-# 6. قائمة الاستعلامات — تستهدف الغرب
 SEARCH_QUERIES = {
     "Lawyers":     f"lawyer in {TARGET_CITY}",
     "Doctors":     f"doctor clinic in {TARGET_CITY}",
@@ -53,133 +41,124 @@ SEARCH_QUERIES = {
     "Restaurants": f"restaurant in {TARGET_CITY}",
 }
 
-# 7. دالة جلب البيانات مع ترحيل ذكي
-def fetch_places(query, api_key, language=DEFAULT_LANGUAGE, max_results=MAX_RESULTS_PER_QUERY):
-    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+# 4. Fetch using New Places API
+def fetch_places(query, api_key, max_results=MAX_RESULTS):
+    url = "https://places.googleapis.com/v1/places:searchText"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.currentOpeningHours,places.location,nextPageToken"
+    }
     results = []
-    params = {'query': query, 'key': api_key, 'language': language}
-
+    page_token = None
     print(f"\n📡 Fetching: '{query}'...")
 
-    try:
-        while len(results) < max_results:
-            response = requests.get(url, params=params, timeout=15).json()
-            status = response.get('status')
+    while len(results) < max_results:
+        body = {"textQuery": query, "languageCode": "en", "maxResultCount": 20}
+        if page_token:
+            body["pageToken"] = page_token
 
-            if status == 'REQUEST_DENIED':
-                print(f"❌ Request denied: {response.get('error_message', 'Check your API key')}")
-                break
-            if status not in ['OK', 'ZERO_RESULTS']:
-                print(f"⚠️ Unexpected status: {status}")
-                break
+        resp = requests.post(url, headers=headers, json=body, timeout=15)
+        data = resp.json()
 
-            places = response.get('results', [])
-            if not places:
-                break
+        if "error" in data:
+            print(f"❌ Error: {data['error'].get('message', 'Unknown error')}")
+            break
 
-            results.extend(places)
-            print(f"   └─ Added {len(places)} places (Total: {len(results)})")
+        places = data.get("places", [])
+        if not places:
+            break
 
-            if len(results) >= max_results:
-                results = results[:max_results]
-                break
+        results.extend(places)
+        print(f"   └─ Added {len(places)} places (Total: {len(results)})")
 
-            if 'next_page_token' in response:
-                time.sleep(2.5)
-                params = {'pagetoken': response['next_page_token'], 'key': api_key}
-            else:
-                break
-    except Exception as e:
-        print(f"⚠️ Connection error: {str(e)}")
+        page_token = data.get("nextPageToken")
+        if not page_token or len(results) >= max_results:
+            break
+        time.sleep(2)
 
-    return results
+    return results[:max_results]
 
-# 8. تنظيف البيانات
-def process_data(raw_results, category):
+# 5. Process data
+def process_data(raw, category):
     cleaned = []
-    for place in raw_results:
-        opening = place.get('opening_hours', {})
-        open_now = opening.get('open_now') if opening else None
-        loc = place.get('geometry', {}).get('location', {})
+    for p in raw:
+        loc = p.get("location", {})
+        oh  = p.get("currentOpeningHours", {})
         cleaned.append({
-            "Category":        category,
-            "Name":            place.get("name", "N/A"),
-            "Address":         place.get("formatted_address", "N/A"),
-            "Rating":          place.get("rating", "N/A"),
-            "Total Reviews":   place.get("user_ratings_total", 0),
-            "Status":          "Open Now" if open_now else "Closed/Unknown",
-            "Location":        f"{loc.get('lat')}, {loc.get('lng')}",
-            "Place ID":        place.get("place_id", ""),
-            "City":            TARGET_CITY,
+            "Category":      category,
+            "Name":          p.get("displayName", {}).get("text", "N/A"),
+            "Address":       p.get("formattedAddress", "N/A"),
+            "Rating":        p.get("rating", "N/A"),
+            "Total Reviews": p.get("userRatingCount", 0),
+            "Status":        "Open Now" if oh.get("openNow") else "Closed/Unknown",
+            "Latitude":      loc.get("latitude", ""),
+            "Longitude":     loc.get("longitude", ""),
+            "Place ID":      p.get("id", ""),
+            "City":          TARGET_CITY,
         })
     return cleaned
 
-# 9. الحفظ في Google Sheets
-def save_to_google_sheets(data, sheet_name, gc):
+# 6. Save to Google Sheets
+def save_to_sheets(data, name, gc):
     try:
         try:
-            sh = gc.open(sheet_name)
+            sh = gc.open(name)
             ws = sh.get_worksheet(0)
         except:
-            sh = gc.create(sheet_name)
+            sh = gc.create(name)
             ws = sh.get_worksheet(0)
-            print(f"📁 Created new sheet: {sheet_name}")
-
+            print(f"📁 Created sheet: {name}")
         df = pd.DataFrame(data)
         ws.clear()
-        ws.update('A1', [df.columns.values.tolist()] + df.values.tolist())
-        print(f"✅ Saved {len(data)} records to Google Sheets: {sheet_name}")
+        ws.update('A1', [df.columns.tolist()] + df.values.tolist())
+        print(f"✅ Saved {len(data)} records to Sheets: {name}")
     except Exception as e:
-        print(f"❌ Sheets save failed: {e}")
+        print(f"❌ Sheets error: {e}")
 
-# 10. الحفظ محلياً
-def save_to_csv(data, filename):
-    pd.DataFrame(data).to_csv(filename, index=False, encoding='utf-8-sig')
-    print(f"💾 CSV saved: {filename}")
+# 7. Save CSV / JSON
+def save_csv(data, f):
+    pd.DataFrame(data).to_csv(f, index=False, encoding='utf-8-sig')
+    print(f"💾 CSV saved: {f}")
 
-def save_to_json(data, filename):
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"📦 JSON saved: {filename}")
+def save_json(data, f):
+    with open(f, 'w', encoding='utf-8') as fp:
+        json.dump(data, fp, ensure_ascii=False, indent=2)
+    print(f"📦 JSON saved: {f}")
 
-# 11. تقرير إحصائيات
-def generate_report(all_data):
-    df = pd.DataFrame(all_data)
-    df['Rating'] = pd.to_numeric(df['Rating'], errors='coerce')  # ✅ Fix: convert to number
-    print("\n" + "="*55)
+# 8. Report
+def report(data):
+    df = pd.DataFrame(data)
+    df['Rating'] = pd.to_numeric(df['Rating'], errors='coerce')
+    print("\n" + "="*50)
     print("📈 EXTRACTION REPORT - ABDellah VENTURES LLC")
-    print("="*55)
-    print(f"Target City      : {TARGET_CITY}")
-    print(f"Total Records    : {len(df)}")
-    if df.empty:
-        return
-    print("\nBy Category:")
-    print(df['Category'].value_counts().to_string())
-    print(f"\nAverage Rating   : {df['Rating'].mean():.2f}")
-    print(f"Total Reviews    : {df['Total Reviews'].sum()}")
-    print(f"Currently Open   : {df[df['Status'] == 'Open Now'].shape[0]}")
-    print("="*55)
+    print("="*50)
+    print(f"City         : {TARGET_CITY}")
+    print(f"Total Records: {len(df)}")
+    if not df.empty:
+        print(f"\nBy Category:\n{df['Category'].value_counts().to_string()}")
+        print(f"\nAvg Rating   : {df['Rating'].mean():.2f}")
+        print(f"Total Reviews: {df['Total Reviews'].sum()}")
+        print(f"Open Now     : {df[df['Status']=='Open Now'].shape[0]}")
+    print("="*50)
 
-# 12. التنفيذ الرئيسي
-if __name__ == "__main__":
-    print(f"\n🚀 Starting extraction for: {TARGET_CITY}...")
-    all_data = []
+# 9. Main
+print(f"\n🚀 Starting extraction for: {TARGET_CITY}...")
+all_data = []
 
-    for category, query in SEARCH_QUERIES.items():
-        raw = fetch_places(query, GOOGLE_MAPS_API_KEY)
-        if raw:
-            processed = process_data(raw, category)
-            all_data.extend(processed)
-        time.sleep(1.5)
+for category, query in SEARCH_QUERIES.items():
+    raw = fetch_places(query, GOOGLE_MAPS_API_KEY)
+    if raw:
+        all_data.extend(process_data(raw, category))
+    time.sleep(1.5)
 
-    if not all_data:
-        print("\n⚠️ No data extracted. Check your API key and billing in Google Cloud Platform.")
-    else:
-        save_to_csv(all_data, OUTPUT_CSV)
-        save_to_json(all_data, OUTPUT_JSON)
-        save_to_google_sheets(all_data, SHEET_NAME, gc)
-        generate_report(all_data)
-
-        print("\n🎉 Done! Data is ready.")
-        print(f"📥 Download CSV & JSON from the Colab Files panel.")
-        print(f"📊 Google Sheets: '{SHEET_NAME}'")
+if not all_data:
+    print("\n⚠️ No data extracted. Check API key, billing, and Places API (New) in Google Cloud.")
+else:
+    save_csv(all_data, OUTPUT_CSV)
+    save_json(all_data, OUTPUT_JSON)
+    save_to_sheets(all_data, SHEET_NAME, gc)
+    report(all_data)
+    print("\n🎉 Done! Data is ready.")
+    print(f"📥 Download CSV & JSON from the Colab Files panel.")
+    print(f"📊 Google Sheets: '{SHEET_NAME}'")
