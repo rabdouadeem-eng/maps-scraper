@@ -6,7 +6,7 @@
 # =====================================================================
 
 # 1. تثبيت المكتبات
-!pip install --upgrade gspread pandas requests --quiet
+
 
 import requests
 import pandas as pd
