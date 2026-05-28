@@ -17,7 +17,7 @@ print("🔐 PROFESSIONAL DATA EXTRACTION - ABDellah VENTURES LLC")
 print("="*50)
 
 # 1. API Key
-GOOGLE_MAPS_API_KEY = userdata.get('GOOGLE_MAPS_API_KEY')
+GOOGLE_MAPS_API_KEY = userdata.get('GOOGLE_MAPS_API_KEY').strip()
 print("✅ Google Maps API Key loaded from Secrets.")
 
 # 2. Google Sheets Auth
